@@ -15,24 +15,14 @@ from contextlib import contextmanager
 
 # ── Detecta qual banco usar ───────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-
-# Streamlit Secrets também expõe via st.secrets
-try:
-    import streamlit as st
-    if not DATABASE_URL and "DATABASE_URL" in st.secrets:
-        DATABASE_URL = st.secrets["DATABASE_URL"]
-except Exception:
-    pass
-
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-USE_POSTGRES = bool(DATABASE_URL)
+USE_PG = bool(DATABASE_URL)
 
 # ══════════════════════════════════════════════════════════
 #  SQLite  (local / sem DATABASE_URL)
 # ══════════════════════════════════════════════════════════
-if not USE_POSTGRES:
+if not USE_PG:
     import sqlite3
     DB_PATH = os.environ.get("BOLAO_DB_PATH", "bolao.db")
     _local  = threading.local()
@@ -114,7 +104,7 @@ else:
 # ══════════════════════════════════════════════════════════
 
 def init_db():
-    if USE_POSTGRES:
+    if USE_PG:
         _init_postgres()
     else:
         _init_sqlite()
@@ -267,7 +257,7 @@ def _migrations_postgres():
 # ══════════════════════════════════════════════════════════
 
 def get_all_participantes():
-    if USE_POSTGRES:
+    if USE_PG:
         conn = _get_conn()
         result = conn.run("SELECT id, nome, enviado_em FROM participantes ORDER BY enviado_em")
         return [(r[0], r[1], str(r[2])) for r in result]
@@ -279,7 +269,7 @@ def get_all_participantes():
 
 
 def get_palpites_by_participante(pid: int) -> dict:
-    if USE_POSTGRES:
+    if USE_PG:
         conn   = _get_conn()
         result = conn.run(
             "SELECT jogo, gols_brasil, gols_adversario FROM palpites WHERE participante_id=:pid",
@@ -295,7 +285,7 @@ def get_palpites_by_participante(pid: int) -> dict:
 
 
 def get_classificacao_palpite(pid: int):
-    if USE_POSTGRES:
+    if USE_PG:
         conn   = _get_conn()
         result = conn.run(
             "SELECT primeiro,segundo,terceiro,quarto FROM classificacao_palpites WHERE participante_id=:pid",
@@ -311,7 +301,7 @@ def get_classificacao_palpite(pid: int):
 
 
 def get_placares_reais() -> dict:
-    if USE_POSTGRES:
+    if USE_PG:
         conn   = _get_conn()
         result = conn.run(
             "SELECT jogo, gols_brasil, gols_adversario, encerrado FROM placares_reais"
@@ -325,7 +315,7 @@ def get_placares_reais() -> dict:
 
 
 def get_classificacao_real() -> dict:
-    if USE_POSTGRES:
+    if USE_PG:
         result = _get_conn().run("SELECT posicao, time FROM classificacao_real ORDER BY posicao")
         return {r[0]: r[1] for r in result}
     else:
@@ -336,7 +326,7 @@ def get_classificacao_real() -> dict:
 
 
 def palpite_enviado(nome: str) -> bool:
-    if USE_POSTGRES:
+    if USE_PG:
         conn   = _get_conn()
         result = conn.run("SELECT id FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome)
         if not result:
@@ -356,7 +346,7 @@ def palpite_enviado(nome: str) -> bool:
 
 
 def get_palpite_completo_por_nome(nome: str):
-    if USE_POSTGRES:
+    if USE_PG:
         conn   = _get_conn()
         result = conn.run(
             "SELECT id, enviado_em FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome
@@ -383,7 +373,7 @@ def get_palpite_completo_por_nome(nome: str):
 # ══════════════════════════════════════════════════════════
 
 def save_palpite(nome: str, palpites: dict, classificacao: tuple) -> bool:
-    if USE_POSTGRES:
+    if USE_PG:
         conn = _get_conn()
         try:
             conn.run("BEGIN")
@@ -446,7 +436,7 @@ def save_palpite(nome: str, palpites: dict, classificacao: tuple) -> bool:
 
 
 def save_placar_real(jogo: str, gols_brasil: int, gols_adversario: int):
-    if USE_POSTGRES:
+    if USE_PG:
         conn = _get_conn()
         conn.run("BEGIN")
         conn.run(
@@ -463,7 +453,7 @@ def save_placar_real(jogo: str, gols_brasil: int, gols_adversario: int):
 
 
 def save_classificacao_real(ordem: list):
-    if USE_POSTGRES:
+    if USE_PG:
         conn = _get_conn()
         conn.run("BEGIN")
         for i, time in enumerate(ordem, 1):
