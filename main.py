@@ -32,7 +32,7 @@ from scoring import calculate_scores
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bolao")
 
-ADMIN_KEY  = os.environ.get("ADMIN_KEY", "brasil2026")
+ADMIN_KEY  = os.environ.get("ADMIN_KEY", "#Brasil2026$")
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 
 app = FastAPI(
