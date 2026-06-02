@@ -28,23 +28,43 @@ def score_participant(pid):
     # ── Placares ──────────────────────────────────────────
     for jogo in ['jogo1', 'jogo2', 'jogo3']:
         real = placares_reais.get(jogo, {})
+        palpite_jogo = palpites.get(jogo)
+
         if not real.get('encerrado'):
-            detail[jogo] = {'pontos': None, 'status': 'pendente'}
+            detail[jogo] = {
+                'pontos': None,
+                'status': 'pendente',
+                'palpite': palpite_jogo if palpite_jogo else [],
+                'real': []
+            }
             continue
-        if jogo not in palpites:
-            detail[jogo] = {'pontos': 0, 'status': 'sem_palpite'}
+
+        if not palpite_jogo:
+            detail[jogo] = {
+                'pontos': 0,
+                'status': 'sem_palpite',
+                'palpite': [],
+                'real': (real.get('brasil'), real.get('adversario'))
+            }
             continue
-        pb, pa = palpites[jogo]
+
+        pb, pa = palpite_jogo
         rb, ra = real['brasil'], real['adversario']
+
         if pb == rb and pa == ra:
             pts = PONTOS_PLACAR_EXATO
             status = 'exato'
         else:
             pts = 0
             status = 'errado'
+
         total += pts
-        detail[jogo] = {'pontos': pts, 'status': status,
-                        'palpite': (pb, pa), 'real': (rb, ra)}
+        detail[jogo] = {
+            'pontos': pts,
+            'status': status,
+            'palpite': (pb, pa),
+            'real': (rb, ra)
+        }
 
     # ── Classificação ─────────────────────────────────────
     classif_pts    = 0
