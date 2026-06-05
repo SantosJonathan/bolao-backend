@@ -28,6 +28,14 @@ from database import (
 )
 from scoring import calculate_scores
 
+
+# ── Config validador de horas ──────────────────────────────
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+DATA_LIMITE_PALPITES = datetime(2026, 6, 6, 0, 0, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))   
+
+
 # ── Config ─────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bolao")
@@ -184,6 +192,11 @@ def get_dados():
 def post_palpite(body: PalpiteInput):
     """Registra palpite. Imutável — uma vez enviado não pode ser alterado."""
     try:
+        agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+        if agora >= DATA_LIMITE_PALPITES:
+            logger.warning(f"⛔ Palpite rejeitado (fora do prazo). Nome: {body.nome}")
+            raise HTTPException(status_code=403, detail="Prazo para envio de palpites encerrado.")
+
         nome = body.nome
 
         if palpite_enviado(nome):
