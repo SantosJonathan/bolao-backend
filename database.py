@@ -53,19 +53,32 @@ if not USE_PG:
 #  pg8000 é pure-Python — funciona em qualquer versão Python
 # ══════════════════════════════════════════════════════════
 else:
+    import re
     import psycopg2
     import psycopg2.pool
-    from psycopg2 import sql as pgsql
 
-    # Transaction pooler não suporta prepared statements
-    # options=-c padrão desabilita isso
     _pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=1,
         maxconn=3,
-        dsn=DATABASE_URL + "?options=-c%20statement_timeout%3D30000",
+        dsn=DATABASE_URL,
         sslmode="require",
         options="-c plan_cache_mode=force_generic_plan"
     )
+
+    def _get_conn():
+        return _pool.getconn()
+
+    def _reset_conn():
+        pass
+
+    def _safe_run(conn, sql, **params):
+        cur = conn.cursor()
+        pg_sql = re.sub(r':(\w+)', r'%(\1)s', sql)
+        cur.execute(pg_sql, params if params else None)
+        try:
+            return cur.fetchall()
+        except Exception:
+            return []
 
     @contextmanager
     def _transaction():
@@ -78,20 +91,6 @@ else:
             raise
         finally:
             _pool.putconn(conn)
-
-    def _safe_run(conn, sql, **params):
-        cur = conn.cursor()
-        # Converte :param para %(param)s (formato psycopg2)
-        import re
-        pg_sql = re.sub(r':(\w+)', r'%(\1)s', sql)
-        cur.execute(pg_sql, params if params else None)
-        try:
-            return cur.fetchall()
-        except Exception:
-            return []
-
-    def _reset_conn():
-        pass
 
     def _rows(result, columns):
         return [dict(zip(columns, row)) for row in result]
