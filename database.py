@@ -72,6 +72,16 @@ else:
     def _reset_conn():
         pass
 
+    def _safe_run(conn, sql, **params):
+        try:
+            return conn.run(sql, **params)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+
     @contextmanager
     def _transaction():
         conn = _get_conn()
