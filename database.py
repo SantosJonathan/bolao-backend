@@ -53,53 +53,38 @@ if not USE_PG:
 #  pg8000 é pure-Python — funciona em qualquer versão Python
 # ══════════════════════════════════════════════════════════
 else:
-    import pg8000.native as pg8000
-    from urllib.parse import urlparse
+    import psycopg2
+    import psycopg2.pool
 
-    _parsed = urlparse(DATABASE_URL)
-    _PG_PARAMS = dict(
-        host=_parsed.hostname,
-        port=_parsed.port or 5432,
-        database=_parsed.path.lstrip("/"),
-        user=_parsed.username,
-        password=_parsed.password,
-        ssl_context=True,
+    _pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=5,  # conservador para não estourar o limite do Supabase
+        dsn=DATABASE_URL,
+        sslmode="require"
     )
-
-    def _get_conn():
-        return pg8000.Connection(**_PG_PARAMS)
-
-    def _reset_conn():
-        pass
-
-    def _safe_run(conn, sql, **params):
-        try:
-            return conn.run(sql, **params)
-        except Exception:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            raise
 
     @contextmanager
     def _transaction():
-        conn = _get_conn()
+        conn = _pool.getconn()
         try:
-            conn.run("BEGIN")
             yield conn
-            conn.run("COMMIT")
+            conn.commit()
         except Exception:
-            try:
-                conn.run("ROLLBACK")
-            except Exception:
-                pass
+            conn.rollback()
             raise
         finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+            _pool.putconn(conn)  # sempre devolve ao pool
+
+    def _safe_run(conn, sql, **params):
+        cur = conn.cursor()
+        cur.execute(sql, params or None)
+        try:
+            return cur.fetchall()
+        except Exception:
+            return []
+
+    def _reset_conn():
+        pass
 
     def _rows(result, columns):
         return [dict(zip(columns, row)) for row in result]
