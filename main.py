@@ -133,60 +133,146 @@ def require_admin(x_admin_key: Optional[str] = Header(None)):
 def root():
     return {"status": "ok", "app": "Bolão Copa 2026"}
 
+
+
+# @app.get("/api/dados")
+# def get_dados():
+#     """Retorna todos os dados necessários para o frontend renderizar."""
+#     try:
+#         placares_reais     = get_placares_reais()
+#         classificacao_real = get_classificacao_real()
+#         scores             = calculate_scores()
+
+#         JOGOS = [("jogo1","MARROCOS","13/06"),
+#                  ("jogo2","HAITI","19/06"),
+#                  ("jogo3","ESCÓCIA","24/06")]
+
+#         jogos = []
+#         for jkey, adv, data in JOGOS:
+#             r = placares_reais.get(jkey, {})
+#             jogos.append({
+#                 "key": jkey, "adv": adv, "data": data,
+#                 "enc": bool(r.get("encerrado")),
+#                 "brasil": r.get("brasil"),
+#                 "adversario": r.get("adversario"),
+#             })
+
+#         ranking = []
+#         for i, e in enumerate(scores, 1):
+#             det = e["detail"]
+#             jd  = []
+#             for jkey, _, _ in JOGOS:
+#                 d = det.get(jkey, {})
+#                 jd.append({
+#                     "status":  d.get("status", "pendente"),
+#                     "palpite": list(d["palpite"]) if "palpite" in d else [],
+#                     "real":    list(d["real"])    if "real"    in d else [],
+#                 })
+#             cl = det.get("classificacao", {})
+#             ranking.append({
+#                 "pos":   i,
+#                 "nome":  e["nome"],
+#                 "total": e["total"],
+#                 "jogos": jd,
+#                 "cp":    cl.get("palpite", []),
+#                 "cr":    cl.get("real", []),
+#                 "cs":    {str(k): v for k, v in cl.get("status", {}).items()},
+#                 "cpts":  cl.get("pontos", 0),
+#             })
+
+#         return {
+#             "jogos":   jogos,
+#             "ranking": ranking,
+#             "cr":      [classificacao_real.get(i, "") for i in range(1, 5)],
+#         }
+#     except Exception as e:
+#         logger.error(f"GET /api/dados: {e}")
+#         raise HTTPException(status_code=500, detail="Erro interno")
+import time
+
+CACHE_DADOS = {
+    "valor": None,
+    "expira_em": 0
+}
+
+def montar_dados():
+    placares_reais     = get_placares_reais()
+    classificacao_real = get_classificacao_real()
+    scores             = calculate_scores()
+
+    JOGOS = [
+        ("jogo1", "MARROCOS", "13/06"),
+        ("jogo2", "HAITI", "19/06"),
+        ("jogo3", "ESCÓCIA", "24/06")
+    ]
+
+    jogos = []
+    for jkey, adv, data in JOGOS:
+        r = placares_reais.get(jkey, {})
+        jogos.append({
+            "key": jkey,
+            "adv": adv,
+            "data": data,
+            "enc": bool(r.get("encerrado")),
+            "brasil": r.get("brasil"),
+            "adversario": r.get("adversario"),
+        })
+
+    ranking = []
+    for i, e in enumerate(scores, 1):
+        det = e["detail"]
+        jd = []
+
+        for jkey, _, _ in JOGOS:
+            d = det.get(jkey, {})
+            jd.append({
+                "status": d.get("status", "pendente"),
+                "palpite": list(d["palpite"]) if "palpite" in d else [],
+                "real": list(d["real"]) if "real" in d else [],
+            })
+
+        cl = det.get("classificacao", {})
+
+        ranking.append({
+            "pos": i,
+            "nome": e["nome"],
+            "total": e["total"],
+            "jogos": jd,
+            "cp": cl.get("palpite", []),
+            "cr": cl.get("real", []),
+            "cs": {str(k): v for k, v in cl.get("status", {}).items()},
+            "cpts": cl.get("pontos", 0),
+        })
+
+    return {
+        "jogos": jogos,
+        "ranking": ranking,
+        "cr": [classificacao_real.get(i, "") for i in range(1, 5)],
+    }
+
+
 @app.get("/api/dados")
 def get_dados():
-    """Retorna todos os dados necessários para o frontend renderizar."""
     try:
-        placares_reais     = get_placares_reais()
-        classificacao_real = get_classificacao_real()
-        scores             = calculate_scores()
+        agora = time.time()
 
-        JOGOS = [("jogo1","MARROCOS","13/06"),
-                 ("jogo2","HAITI","19/06"),
-                 ("jogo3","ESCÓCIA","24/06")]
+        if CACHE_DADOS["valor"] is not None and agora < CACHE_DADOS["expira_em"]:
+            return CACHE_DADOS["valor"]
 
-        jogos = []
-        for jkey, adv, data in JOGOS:
-            r = placares_reais.get(jkey, {})
-            jogos.append({
-                "key": jkey, "adv": adv, "data": data,
-                "enc": bool(r.get("encerrado")),
-                "brasil": r.get("brasil"),
-                "adversario": r.get("adversario"),
-            })
+        inicio = time.time()
 
-        ranking = []
-        for i, e in enumerate(scores, 1):
-            det = e["detail"]
-            jd  = []
-            for jkey, _, _ in JOGOS:
-                d = det.get(jkey, {})
-                jd.append({
-                    "status":  d.get("status", "pendente"),
-                    "palpite": list(d["palpite"]) if "palpite" in d else [],
-                    "real":    list(d["real"])    if "real"    in d else [],
-                })
-            cl = det.get("classificacao", {})
-            ranking.append({
-                "pos":   i,
-                "nome":  e["nome"],
-                "total": e["total"],
-                "jogos": jd,
-                "cp":    cl.get("palpite", []),
-                "cr":    cl.get("real", []),
-                "cs":    {str(k): v for k, v in cl.get("status", {}).items()},
-                "cpts":  cl.get("pontos", 0),
-            })
+        resultado = montar_dados()
 
-        return {
-            "jogos":   jogos,
-            "ranking": ranking,
-            "cr":      [classificacao_real.get(i, "") for i in range(1, 5)],
-        }
+        CACHE_DADOS["valor"] = resultado
+        CACHE_DADOS["expira_em"] = agora + 60
+
+        logger.info(f"GET /api/dados gerado em {time.time() - inicio:.2f}s")
+
+        return resultado
+
     except Exception as e:
         logger.error(f"GET /api/dados: {e}")
         raise HTTPException(status_code=500, detail="Erro interno")
-
 
 @app.post("/api/palpite")
 def post_palpite(body: PalpiteInput):
