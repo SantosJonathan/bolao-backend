@@ -36,6 +36,7 @@ if not USE_PG:
             conn.execute("PRAGMA synchronous=NORMAL")
             _local.conn = conn
         return _local.conn
+        
 
     @contextmanager
     def _transaction():
@@ -57,78 +58,119 @@ else:
 
     _parsed = urlparse(DATABASE_URL)
     _PG_PARAMS = dict(
-        host     = _parsed.hostname,
-        port     = _parsed.port or 5432,
-        database = _parsed.path.lstrip("/"),
-        user     = _parsed.username,
-        password = _parsed.password,
-        ssl_context = True,   # Supabase exige SSL
+        host=_parsed.hostname,
+        port=_parsed.port or 5432,
+        database=_parsed.path.lstrip("/"),
+        user=_parsed.username,
+        password=_parsed.password,
+        ssl_context=True,
     )
 
-    # Conexão simples por thread.
-    # Importante: em Supabase/Render, uma conexão pode ficar inválida após restart,
-    # troca de plano ou uso do pooler. Por isso temos reset + retry.
-    _local_pg = threading.local()
-
-    def _is_prepared_statement_error(e: Exception) -> bool:
-        msg = str(e).lower()
-        return (
-            "prepared statement does not exist" in msg
-            or "unnamed prepared statement does not exist" in msg
-            or "'c': '26000'" in msg
-            or '"c": "26000"' in msg
-            or "26000" in msg
-        )
-
-    def _new_conn():
+    def _get_conn():
         return pg8000.Connection(**_PG_PARAMS)
 
-    def _get_conn():
-        conn = getattr(_local_pg, "conn", None)
-        if conn is None:
-            _local_pg.conn = _new_conn()
-        return _local_pg.conn
-
     def _reset_conn():
-        try:
-            conn = getattr(_local_pg, "conn", None)
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-        _local_pg.conn = None
-
-    def _safe_run(conn, sql, **params):
-        """
-        Executa SQL no PostgreSQL.
-        Se der erro de prepared statement antigo/inválido, recria a conexão e tenta 1 vez.
-        """
-        try:
-            return conn.run(sql, **params)
-        except Exception as e:
-            if _is_prepared_statement_error(e):
-                _reset_conn()
-                conn = _get_conn()
-                return conn.run(sql, **params)
-            raise
+        pass
 
     @contextmanager
     def _transaction():
         conn = _get_conn()
         try:
-            _safe_run(conn, "BEGIN")
+            conn.run("BEGIN")
             yield conn
-            _safe_run(conn, "COMMIT")
+            conn.run("COMMIT")
         except Exception:
             try:
-                _safe_run(conn, "ROLLBACK")
+                conn.run("ROLLBACK")
             except Exception:
-                _reset_conn()
+                pass
             raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _rows(result, columns):
-        """Converte resultado pg8000 em lista de dicts."""
         return [dict(zip(columns, row)) for row in result]
+# else:
+#     import pg8000.native as pg8000
+#     from urllib.parse import urlparse
+
+#     _parsed = urlparse(DATABASE_URL)
+#     _PG_PARAMS = dict(
+#         host     = _parsed.hostname,
+#         port     = _parsed.port or 5432,
+#         database = _parsed.path.lstrip("/"),
+#         user     = _parsed.username,
+#         password = _parsed.password,
+#         ssl_context = True,   # Supabase exige SSL
+#     )
+
+#     # Conexão simples por thread.
+#     # Importante: em Supabase/Render, uma conexão pode ficar inválida após restart,
+#     # troca de plano ou uso do pooler. Por isso temos reset + retry.
+#     _local_pg = threading.local()
+
+#     def _is_prepared_statement_error(e: Exception) -> bool:
+#         msg = str(e).lower()
+#         return (
+#             "prepared statement does not exist" in msg
+#             or "unnamed prepared statement does not exist" in msg
+#             or "'c': '26000'" in msg
+#             or '"c": "26000"' in msg
+#             or "26000" in msg
+#         )
+
+#     def _new_conn():
+#         return pg8000.Connection(**_PG_PARAMS)
+
+#     def _get_conn():
+#         conn = getattr(_local_pg, "conn", None)
+#         if conn is None:
+#             _local_pg.conn = _new_conn()
+#         return _local_pg.conn
+
+#     def _reset_conn():
+#         try:
+#             conn = getattr(_local_pg, "conn", None)
+#             if conn:
+#                 conn.close()
+#         except Exception:
+#             pass
+#         _local_pg.conn = None
+
+#     def _safe_run(conn, sql, **params):
+#         """
+#         Executa SQL no PostgreSQL.
+#         Se der erro de prepared statement antigo/inválido, recria a conexão e tenta 1 vez.
+#         """
+#         try:
+#             return conn.run(sql, **params)
+#         except Exception as e:
+#             if _is_prepared_statement_error(e):
+#                 _reset_conn()
+#                 conn = _get_conn()
+#                 return conn.run(sql, **params)
+#             raise
+
+#     @contextmanager
+#     def _transaction():
+#         conn = _get_conn()
+#         try:
+#             _safe_run(conn, "BEGIN")
+#             yield conn
+#             _safe_run(conn, "COMMIT")
+#         except Exception:
+#             try:
+#                 _safe_run(conn, "ROLLBACK")
+#             except Exception:
+#                 _reset_conn()
+#             raise
+
+#     def _rows(result, columns):
+#         """Converte resultado pg8000 em lista de dicts."""
+#         return [dict(zip(columns, row)) for row in result]
 
 
 # ══════════════════════════════════════════════════════════
