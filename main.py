@@ -271,7 +271,7 @@ def get_dados():
         return resultado
 
     except Exception as e:
-        logger.error(f"GET /api/dados: {e}")
+        logger.error(f"GET /api/dados: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Erro interno")
 
 @app.post("/api/palpite")
