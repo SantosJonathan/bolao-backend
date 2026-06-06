@@ -1,15 +1,16 @@
 """
 database.py — Suporte dual: PostgreSQL (Supabase/produção) + SQLite (local).
 
-Em produção no Streamlit Cloud:
-  - Define DATABASE_URL nos Secrets do Streamlit com a connection string do Supabase
-  - Os dados persistem para sempre no PostgreSQL gratuito do Supabase
+Em produção:
+  - Define DATABASE_URL na env com a connection string do Supabase (Transaction Pooler, porta 6543)
+  - Os dados persistem no PostgreSQL do Supabase
 
 Localmente:
   - Sem DATABASE_URL → usa SQLite (bolao.db)
 """
 
 import os
+import re
 import threading
 from contextlib import contextmanager
 
@@ -36,7 +37,6 @@ if not USE_PG:
             conn.execute("PRAGMA synchronous=NORMAL")
             _local.conn = conn
         return _local.conn
-        
 
     @contextmanager
     def _transaction():
@@ -49,29 +49,32 @@ if not USE_PG:
             raise
 
 # ══════════════════════════════════════════════════════════
-#  PostgreSQL via pg8000  (Supabase / produção)
-#  pg8000 é pure-Python — funciona em qualquer versão Python
+#  PostgreSQL via psycopg2 + pool  (Supabase / produção)
+#  Use Transaction Pooler do Supabase (porta 6543)
 # ══════════════════════════════════════════════════════════
 else:
-    import re
     import psycopg2
     import psycopg2.pool
 
     _pool = psycopg2.pool.ThreadedConnectionPool(
         minconn=1,
-        maxconn=3,
+        maxconn=3,  # conservador — Transaction Pooler aguenta bem
         dsn=DATABASE_URL,
         sslmode="require",
-        options="-c plan_cache_mode=force_generic_plan"
+        options="-c plan_cache_mode=force_generic_plan"  # desabilita prepared statements
     )
 
-    def _get_conn():
-        return _pool.getconn()
+    @contextmanager
+    def _get_conn_ctx():
+        """Context manager que pega e devolve conexão ao pool automaticamente."""
+        conn = _pool.getconn()
+        try:
+            yield conn
+        finally:
+            _pool.putconn(conn)
 
-    def _reset_conn():
-        pass
-
-    def _safe_run(conn, sql, **params):
+    def _run(conn, sql, **params):
+        """Executa SQL convertendo :param → %(param)s (formato psycopg2)."""
         cur = conn.cursor()
         pg_sql = re.sub(r':(\w+)', r'%(\1)s', sql)
         cur.execute(pg_sql, params if params else None)
@@ -91,87 +94,6 @@ else:
             raise
         finally:
             _pool.putconn(conn)
-
-    def _rows(result, columns):
-        return [dict(zip(columns, row)) for row in result]
-# else:
-#     import pg8000.native as pg8000
-#     from urllib.parse import urlparse
-
-#     _parsed = urlparse(DATABASE_URL)
-#     _PG_PARAMS = dict(
-#         host     = _parsed.hostname,
-#         port     = _parsed.port or 5432,
-#         database = _parsed.path.lstrip("/"),
-#         user     = _parsed.username,
-#         password = _parsed.password,
-#         ssl_context = True,   # Supabase exige SSL
-#     )
-
-#     # Conexão simples por thread.
-#     # Importante: em Supabase/Render, uma conexão pode ficar inválida após restart,
-#     # troca de plano ou uso do pooler. Por isso temos reset + retry.
-#     _local_pg = threading.local()
-
-#     def _is_prepared_statement_error(e: Exception) -> bool:
-#         msg = str(e).lower()
-#         return (
-#             "prepared statement does not exist" in msg
-#             or "unnamed prepared statement does not exist" in msg
-#             or "'c': '26000'" in msg
-#             or '"c": "26000"' in msg
-#             or "26000" in msg
-#         )
-
-#     def _new_conn():
-#         return pg8000.Connection(**_PG_PARAMS)
-
-#     def _get_conn():
-#         conn = getattr(_local_pg, "conn", None)
-#         if conn is None:
-#             _local_pg.conn = _new_conn()
-#         return _local_pg.conn
-
-#     def _reset_conn():
-#         try:
-#             conn = getattr(_local_pg, "conn", None)
-#             if conn:
-#                 conn.close()
-#         except Exception:
-#             pass
-#         _local_pg.conn = None
-
-#     def _safe_run(conn, sql, **params):
-#         """
-#         Executa SQL no PostgreSQL.
-#         Se der erro de prepared statement antigo/inválido, recria a conexão e tenta 1 vez.
-#         """
-#         try:
-#             return conn.run(sql, **params)
-#         except Exception as e:
-#             if _is_prepared_statement_error(e):
-#                 _reset_conn()
-#                 conn = _get_conn()
-#                 return conn.run(sql, **params)
-#             raise
-
-#     @contextmanager
-#     def _transaction():
-#         conn = _get_conn()
-#         try:
-#             _safe_run(conn, "BEGIN")
-#             yield conn
-#             _safe_run(conn, "COMMIT")
-#         except Exception:
-#             try:
-#                 _safe_run(conn, "ROLLBACK")
-#             except Exception:
-#                 _reset_conn()
-#             raise
-
-#     def _rows(result, columns):
-#         """Converte resultado pg8000 em lista de dicts."""
-#         return [dict(zip(columns, row)) for row in result]
 
 
 # ══════════════════════════════════════════════════════════
@@ -206,31 +128,30 @@ def _init_sqlite():
 
 
 def _init_postgres():
-    conn = _get_conn()
-    try:
-        _safe_run(conn, "BEGIN")
-        _safe_run(conn, """
-            CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)
-        """)
-        rows = _safe_run(conn, "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
-        current = rows[0][0] if rows else 0
+    with _get_conn_ctx() as conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
+            cur.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+            row = cur.fetchone()
+            current = row[0] if row else 0
 
-        for i, sql in enumerate(_migrations_postgres()):
-            if current < i + 1:
-                try:
-                    _safe_run(conn, sql)
-                    if current == 0 and i == 0:
-                        _safe_run(conn, "INSERT INTO schema_version VALUES (:v)", v=i+1)
-                    else:
-                        _safe_run(conn, "UPDATE schema_version SET version = :v", v=i+1)
-                    current = i + 1
-                except Exception as e:
-                    import sys
-                    print(f"[bolao] PG migration v{i+1} failed: {e}", file=sys.stderr)
-        _safe_run(conn, "COMMIT")
-    except Exception:
-        try: _safe_run(conn, "ROLLBACK")
-        except: _reset_conn()
+            for i, sql in enumerate(_migrations_postgres()):
+                if current < i + 1:
+                    try:
+                        cur.execute(sql)
+                        if current == 0 and i == 0:
+                            cur.execute("INSERT INTO schema_version VALUES (%s)", (i + 1,))
+                        else:
+                            cur.execute("UPDATE schema_version SET version = %s", (i + 1,))
+                        current = i + 1
+                    except Exception as e:
+                        import sys
+                        print(f"[bolao] PG migration v{i+1} failed: {e}", file=sys.stderr)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _migrations_sqlite():
@@ -318,11 +239,11 @@ def _migrations_postgres():
             time TEXT NOT NULL
         );
         INSERT INTO placares_reais (jogo,encerrado) VALUES ('jogo1',0),('jogo2',0),('jogo3',0)
-        ON CONFLICT (jogo) DO NOTHING;
+        ON CONFLICT (jogo) DO NOTHING
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_pal_part ON palpites(participante_id);
-        CREATE INDEX IF NOT EXISTS idx_pal_jogo ON palpites(jogo);
+        CREATE INDEX IF NOT EXISTS idx_pal_jogo ON palpites(jogo)
         """,
     ]
 
@@ -333,9 +254,9 @@ def _migrations_postgres():
 
 def get_all_participantes():
     if USE_PG:
-        conn = _get_conn()
-        result = _safe_run(conn, "SELECT id, nome, enviado_em FROM participantes ORDER BY enviado_em")
-        return [(r[0], r[1], str(r[2])) for r in result]
+        with _get_conn_ctx() as conn:
+            rows = _run(conn, "SELECT id, nome, enviado_em FROM participantes ORDER BY enviado_em")
+            return [(r[0], r[1], str(r[2])) for r in rows]
     else:
         rows = _get_conn().execute(
             "SELECT id, nome, enviado_em FROM participantes ORDER BY enviado_em"
@@ -345,12 +266,12 @@ def get_all_participantes():
 
 def get_palpites_by_participante(pid: int) -> dict:
     if USE_PG:
-        conn   = _get_conn()
-        result = _safe_run(conn, 
-            "SELECT jogo, gols_brasil, gols_adversario FROM palpites WHERE participante_id=:pid",
-            pid=pid
-        )
-        return {r[0]: (r[1], r[2]) for r in result}
+        with _get_conn_ctx() as conn:
+            rows = _run(conn,
+                "SELECT jogo, gols_brasil, gols_adversario FROM palpites WHERE participante_id=:pid",
+                pid=pid
+            )
+            return {r[0]: (r[1], r[2]) for r in rows}
     else:
         rows = _get_conn().execute(
             "SELECT jogo, gols_brasil, gols_adversario FROM palpites WHERE participante_id=?",
@@ -361,12 +282,12 @@ def get_palpites_by_participante(pid: int) -> dict:
 
 def get_classificacao_palpite(pid: int):
     if USE_PG:
-        conn   = _get_conn()
-        result = _safe_run(conn, 
-            "SELECT primeiro,segundo,terceiro,quarto FROM classificacao_palpites WHERE participante_id=:pid",
-            pid=pid
-        )
-        return tuple(result[0]) if result else None
+        with _get_conn_ctx() as conn:
+            rows = _run(conn,
+                "SELECT primeiro,segundo,terceiro,quarto FROM classificacao_palpites WHERE participante_id=:pid",
+                pid=pid
+            )
+            return tuple(rows[0]) if rows else None
     else:
         row = _get_conn().execute(
             "SELECT primeiro,segundo,terceiro,quarto FROM classificacao_palpites WHERE participante_id=?",
@@ -377,11 +298,11 @@ def get_classificacao_palpite(pid: int):
 
 def get_placares_reais() -> dict:
     if USE_PG:
-        conn   = _get_conn()
-        result = _safe_run(conn, 
-            "SELECT jogo, gols_brasil, gols_adversario, encerrado FROM placares_reais"
-        )
-        return {r[0]: {"brasil": r[1], "adversario": r[2], "encerrado": r[3]} for r in result}
+        with _get_conn_ctx() as conn:
+            rows = _run(conn,
+                "SELECT jogo, gols_brasil, gols_adversario, encerrado FROM placares_reais"
+            )
+            return {r[0]: {"brasil": r[1], "adversario": r[2], "encerrado": r[3]} for r in rows}
     else:
         rows = _get_conn().execute(
             "SELECT jogo, gols_brasil, gols_adversario, encerrado FROM placares_reais"
@@ -391,8 +312,9 @@ def get_placares_reais() -> dict:
 
 def get_classificacao_real() -> dict:
     if USE_PG:
-        result = _safe_run(_get_conn(), "SELECT posicao, time FROM classificacao_real ORDER BY posicao")
-        return {r[0]: r[1] for r in result}
+        with _get_conn_ctx() as conn:
+            rows = _run(conn, "SELECT posicao, time FROM classificacao_real ORDER BY posicao")
+            return {r[0]: r[1] for r in rows}
     else:
         rows = _get_conn().execute(
             "SELECT posicao, time FROM classificacao_real ORDER BY posicao"
@@ -402,16 +324,16 @@ def get_classificacao_real() -> dict:
 
 def palpite_enviado(nome: str) -> bool:
     if USE_PG:
-        conn   = _get_conn()
-        result = _safe_run(conn, "SELECT id FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome)
-        if not result:
-            return False
-        pid    = result[0][0]
-        count  = _safe_run(conn, "SELECT COUNT(*) FROM palpites WHERE participante_id=:pid", pid=pid)
-        return count[0][0] > 0
+        with _get_conn_ctx() as conn:
+            result = _run(conn, "SELECT id FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome)
+            if not result:
+                return False
+            pid = result[0][0]
+            count = _run(conn, "SELECT COUNT(*) FROM palpites WHERE participante_id=:pid", pid=pid)
+            return count[0][0] > 0
     else:
         conn = _get_conn()
-        row  = conn.execute("SELECT id FROM participantes WHERE nome=?", (nome,)).fetchone()
+        row = conn.execute("SELECT id FROM participantes WHERE nome=?", (nome,)).fetchone()
         if not row:
             return False
         count = conn.execute(
@@ -422,19 +344,20 @@ def palpite_enviado(nome: str) -> bool:
 
 def get_palpite_completo_por_nome(nome: str):
     if USE_PG:
-        conn   = _get_conn()
-        result = _safe_run(conn, 
-            "SELECT id, enviado_em FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome
-        )
-        if not result:
-            return None
-        pid, enviado_em = result[0][0], str(result[0][1])
+        with _get_conn_ctx() as conn:
+            result = _run(conn,
+                "SELECT id, enviado_em FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome
+            )
+            if not result:
+                return None
+            pid, enviado_em = result[0][0], str(result[0][1])
     else:
         conn = _get_conn()
-        row  = conn.execute("SELECT id, enviado_em FROM participantes WHERE nome=?", (nome,)).fetchone()
+        row = conn.execute("SELECT id, enviado_em FROM participantes WHERE nome=?", (nome,)).fetchone()
         if not row:
             return None
         pid, enviado_em = row["id"], row["enviado_em"]
+
     return {
         "pid":        pid,
         "enviado_em": enviado_em,
@@ -449,30 +372,27 @@ def get_palpite_completo_por_nome(nome: str):
 
 def save_palpite(nome: str, palpites: dict, classificacao: tuple) -> bool:
     if USE_PG:
-        conn = _get_conn()
-        try:
-            _safe_run(conn, "BEGIN")
-            _safe_run(conn, 
+        with _transaction() as conn:
+            _run(conn,
                 "INSERT INTO participantes (nome) VALUES (:nome) ON CONFLICT (nome) DO NOTHING",
                 nome=nome
             )
-            result = _safe_run(conn, 
+            result = _run(conn,
                 "SELECT id FROM participantes WHERE LOWER(nome)=LOWER(:nome)", nome=nome
             )
             pid = result[0][0]
-            count = _safe_run(conn, 
+            count = _run(conn,
                 "SELECT COUNT(*) FROM palpites WHERE participante_id=:pid", pid=pid
             )[0][0]
             if count > 0:
-                _safe_run(conn, "ROLLBACK")
                 return False
             for jogo, (gb, ga) in palpites.items():
-                _safe_run(conn, 
+                _run(conn,
                     """INSERT INTO palpites (participante_id,jogo,gols_brasil,gols_adversario)
                        VALUES (:pid,:jogo,:gb,:ga) ON CONFLICT (participante_id,jogo) DO NOTHING""",
                     pid=pid, jogo=jogo, gb=gb, ga=ga
                 )
-            _safe_run(conn, 
+            _run(conn,
                 """INSERT INTO classificacao_palpites
                    (participante_id,primeiro,segundo,terceiro,quarto)
                    VALUES (:pid,:c1,:c2,:c3,:c4)
@@ -480,12 +400,7 @@ def save_palpite(nome: str, palpites: dict, classificacao: tuple) -> bool:
                 pid=pid, c1=classificacao[0], c2=classificacao[1],
                 c3=classificacao[2], c4=classificacao[3]
             )
-            _safe_run(conn, "COMMIT")
-            return True
-        except Exception:
-            try: _safe_run(conn, "ROLLBACK")
-            except: _reset_conn()
-            raise
+        return True
     else:
         with _transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO participantes (nome) VALUES (?)", (nome,))
@@ -512,13 +427,11 @@ def save_palpite(nome: str, palpites: dict, classificacao: tuple) -> bool:
 
 def save_placar_real(jogo: str, gols_brasil: int, gols_adversario: int):
     if USE_PG:
-        conn = _get_conn()
-        _safe_run(conn, "BEGIN")
-        _safe_run(conn, 
-            "UPDATE placares_reais SET gols_brasil=:gb, gols_adversario=:ga, encerrado=1 WHERE jogo=:jogo",
-            gb=gols_brasil, ga=gols_adversario, jogo=jogo
-        )
-        _safe_run(conn, "COMMIT")
+        with _transaction() as conn:
+            _run(conn,
+                "UPDATE placares_reais SET gols_brasil=:gb, gols_adversario=:ga, encerrado=1 WHERE jogo=:jogo",
+                gb=gols_brasil, ga=gols_adversario, jogo=jogo
+            )
     else:
         with _transaction() as conn:
             conn.execute(
@@ -529,15 +442,13 @@ def save_placar_real(jogo: str, gols_brasil: int, gols_adversario: int):
 
 def save_classificacao_real(ordem: list):
     if USE_PG:
-        conn = _get_conn()
-        _safe_run(conn, "BEGIN")
-        for i, time in enumerate(ordem, 1):
-            _safe_run(conn, 
-                """INSERT INTO classificacao_real (posicao,time) VALUES (:pos,:time)
-                   ON CONFLICT (posicao) DO UPDATE SET time=EXCLUDED.time""",
-                pos=i, time=time
-            )
-        _safe_run(conn, "COMMIT")
+        with _transaction() as conn:
+            for i, time in enumerate(ordem, 1):
+                _run(conn,
+                    """INSERT INTO classificacao_real (posicao,time) VALUES (:pos,:time)
+                       ON CONFLICT (posicao) DO UPDATE SET time=EXCLUDED.time""",
+                    pos=i, time=time
+                )
     else:
         with _transaction() as conn:
             for i, time in enumerate(ordem, 1):
