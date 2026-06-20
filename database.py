@@ -429,14 +429,28 @@ def save_placar_real(jogo: str, gols_brasil: int, gols_adversario: int):
     if USE_PG:
         with _transaction() as conn:
             _run(conn,
-                "UPDATE placares_reais SET gols_brasil=:gb, gols_adversario=:ga, encerrado=1 WHERE jogo=:jogo",
+                """
+                INSERT INTO placares_reais (jogo, gols_brasil, gols_adversario, encerrado)
+                VALUES (:jogo, :gb, :ga, TRUE)
+                ON CONFLICT (jogo) DO UPDATE SET
+                    gols_brasil = EXCLUDED.gols_brasil,
+                    gols_adversario = EXCLUDED.gols_adversario,
+                    encerrado = TRUE
+                """,
                 gb=gols_brasil, ga=gols_adversario, jogo=jogo
             )
     else:
         with _transaction() as conn:
             conn.execute(
-                "UPDATE placares_reais SET gols_brasil=?,gols_adversario=?,encerrado=1 WHERE jogo=?",
-                (gols_brasil, gols_adversario, jogo)
+                """
+                INSERT INTO placares_reais (jogo, gols_brasil, gols_adversario, encerrado)
+                VALUES (?, ?, ?, TRUE)
+                ON CONFLICT(jogo) DO UPDATE SET
+                    gols_brasil = excluded.gols_brasil,
+                    gols_adversario = excluded.gols_adversario,
+                    encerrado = TRUE
+                """,
+                (jogo, gols_brasil, gols_adversario)
             )
 
 
